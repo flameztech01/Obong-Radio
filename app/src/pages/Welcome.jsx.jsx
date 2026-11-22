@@ -39,7 +39,7 @@ const Welcome = () => {
       <header className="relative z-10 w-full px-6 py-5 md:px-10 md:py-6 flex items-center justify-between shrink-0 animate-in fade-in slide-in-from-top-4 duration-700">
         <div className="flex items-center gap-3 md:gap-4">
           <img 
-            src="/logo.png" 
+            src="/logo.jfif" 
             alt="Obong University Logo" 
             className="w-10 h-10 md:w-12 md:h-12 object-contain drop-shadow-lg"
           />
