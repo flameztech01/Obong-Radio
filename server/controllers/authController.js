@@ -3,7 +3,7 @@ import crypto from "crypto";
 import { v2 as cloudinary } from "cloudinary";
 import User from "../models/userModel.js";
 import Department from "../models/departmentModel.js"; // Kept if you still want users to select a department
-import generateToken from "../utils/GenerateToken.js";
+import generateToken from "../utils/generateToken.js";
 import { sendOtpEmail } from "../services/emailService.js";
 
 /* ---------- cloudinary helper ---------- */
