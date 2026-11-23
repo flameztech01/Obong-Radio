@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router';
 import { 
   Play, Pause, Volume2, VolumeX, Share2, Radio as RadioIcon,
-  ArrowLeft, MessageSquare, Calendar, Heart, Clock
+  ArrowLeft, MessageSquare, Calendar, Heart, Clock, Loader2
 } from 'lucide-react';
 import { socket } from '../services/socket'; 
 import LiveChat from '../components/LiveChat'; 
@@ -42,10 +42,17 @@ const Radio = () => {
   
   // 1. Get Audio Player State from Context
   const { 
-    isPlaying, isMusicMode, currentShow, 
+    isPlaying, isBuffering, isMusicMode, currentShow, 
     volume, isMuted, togglePlay, toggleMute, 
     handleVolumeChange, showImage 
   } = useAudioPlayer();
+
+  // Real state: sound is only "active" once audio is actually coming out
+  const showSpinner = isPlaying && isBuffering;
+  const isActive = isPlaying && !isBuffering;
+  const statusLabel = isMusicMode
+    ? (showSpinner ? 'Loading…' : isPlaying ? 'Playing' : 'Paused')
+    : 'On Air';
   
   // 2. Local State for Live Chat
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -120,7 +127,7 @@ const Radio = () => {
 
             <div className="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-md border border-white/10 bg-black/40 px-2 py-0.5 backdrop-blur-md">
               <span className="relative flex h-1.5 w-1.5">
-                <span className={`absolute inline-flex h-full w-full rounded-full ${isMusicMode ? 'bg-yellow-500' : 'bg-red-500'} opacity-75 ${isPlaying ? 'animate-ping' : ''}`}></span>
+                <span className={`absolute inline-flex h-full w-full rounded-full ${isMusicMode ? 'bg-yellow-500' : 'bg-red-500'} opacity-75 ${isActive ? 'animate-ping' : ''}`}></span>
                 <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${isMusicMode ? 'bg-yellow-500' : 'bg-red-500'}`}></span>
               </span>
               <span className="text-[8px] font-bold tracking-widest text-white">{isMusicMode ? 'AUTO DJ' : 'LIVE'}</span>
@@ -135,7 +142,7 @@ const Radio = () => {
           </div>
 
           <div className="w-full max-w-[200px]">
-            <Visualizer isPlaying={isPlaying} height="h-8" barCount={16} />
+            <Visualizer isPlaying={isActive} height="h-8" barCount={16} />
           </div>
         </div>
 
@@ -146,10 +153,10 @@ const Radio = () => {
             <div className="mb-4">
               <div className="flex justify-between text-[9px] font-bold text-zinc-500 uppercase tracking-widest mb-1.5">
                 <span>{isMusicMode ? 'Auto DJ Queue' : 'Live Stream'}</span>
-                <span className={isMusicMode ? 'text-zinc-400' : 'text-yellow-500'}>{isMusicMode ? 'Playing' : 'On Air'}</span>
+                <span className={isMusicMode ? 'text-zinc-400' : 'text-yellow-500'}>{statusLabel}</span>
               </div>
               <div className="h-1.5 w-full bg-zinc-800/80 rounded-full overflow-hidden">
-                <div className={`h-full w-full ${isMusicMode ? 'bg-zinc-600' : 'bg-yellow-500 animate-pulse'}`}></div>
+                <div className={`h-full w-full ${isMusicMode ? 'bg-zinc-600' : 'bg-yellow-500 animate-pulse'} ${showSpinner ? 'animate-pulse' : ''}`}></div>
               </div>
             </div>
 
@@ -174,7 +181,13 @@ const Radio = () => {
                 onClick={togglePlay}
                 className="flex h-16 w-16 items-center justify-center rounded-full bg-yellow-500 text-zinc-950 shadow-[0_0_30px_rgba(234,179,8,0.3)] transition-all active:scale-95"
               >
-                {isPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" className="ml-1" />}
+                {showSpinner ? (
+                  <Loader2 size={28} className="animate-spin" />
+                ) : isPlaying ? (
+                  <Pause size={28} fill="currentColor" />
+                ) : (
+                  <Play size={28} fill="currentColor" className="ml-1" />
+                )}
               </button>
 
               <button className="flex flex-col items-center gap-1.5 text-zinc-400 hover:text-yellow-500 transition-colors w-16">
@@ -200,7 +213,7 @@ const Radio = () => {
             </button>
             <div className="flex items-center gap-2 rounded-md border border-zinc-800/80 bg-zinc-950/80 px-3 py-1">
               <span className="relative flex h-2 w-2">
-                <span className={`absolute inline-flex h-full w-full rounded-full ${isMusicMode ? 'bg-yellow-500' : 'bg-red-500'} opacity-75 ${isPlaying ? 'animate-ping' : ''}`}></span>
+                <span className={`absolute inline-flex h-full w-full rounded-full ${isMusicMode ? 'bg-yellow-500' : 'bg-red-500'} opacity-75 ${isActive ? 'animate-ping' : ''}`}></span>
                 <span className={`relative inline-flex h-2 w-2 rounded-full ${isMusicMode ? 'bg-yellow-500' : 'bg-red-500'}`}></span>
               </span>
               <span className="text-[10px] font-bold tracking-widest text-white">{isMusicMode ? 'AUTO DJ' : 'ON AIR'}</span>
@@ -215,14 +228,16 @@ const Radio = () => {
               </div>
 
               <div className="flex-1 text-center lg:text-left">
-                <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-yellow-500">{isMusicMode ? 'Auto DJ Playing' : 'Currently Playing'}</p>
+                <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-yellow-500">
+                  {isMusicMode ? (showSpinner ? 'Loading track…' : 'Auto DJ Playing') : 'Currently Playing'}
+                </p>
                 <h1 className="mb-3 font-serif text-4xl leading-tight tracking-tight text-white lg:text-5xl drop-shadow-lg line-clamp-2">{currentShow.title}</h1>
                 <p className="mb-6 text-[13px] font-medium text-zinc-400">
                   {isMusicMode ? 'Artist' : 'Hosted by'} <span className="text-zinc-200">{currentShow.host}</span> <br/>
                   <span className="mt-1 block text-[11px] uppercase tracking-wider text-zinc-500">Obong University Radio 98.5</span>
                 </p>
                 <div className="mx-auto w-full max-w-xs lg:mx-0">
-                  <Visualizer isPlaying={isPlaying} height="h-12" barCount={24} />
+                  <Visualizer isPlaying={isActive} height="h-12" barCount={24} />
                 </div>
               </div>
             </div>
@@ -230,7 +245,7 @@ const Radio = () => {
 
           <div className="border-t border-zinc-800/80 bg-zinc-950/40 backdrop-blur-md">
             <div className="w-full h-1 bg-zinc-800/50">
-               <div className={`h-full w-full ${isMusicMode ? 'bg-zinc-600' : 'bg-yellow-500 animate-pulse'}`}></div>
+               <div className={`h-full w-full ${isMusicMode ? 'bg-zinc-600' : 'bg-yellow-500 animate-pulse'} ${showSpinner ? 'animate-pulse' : ''}`}></div>
             </div>
             
             <div className="flex items-center justify-between p-6">
@@ -249,7 +264,13 @@ const Radio = () => {
                 onClick={togglePlay} 
                 className="flex h-16 w-16 items-center justify-center rounded-full bg-yellow-500 text-zinc-950 shadow-[0_0_30px_rgba(234,179,8,0.3)] transition-all hover:scale-105 active:scale-95"
               >
-                {isPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" className="ml-1" />}
+                {showSpinner ? (
+                  <Loader2 size={28} className="animate-spin" />
+                ) : isPlaying ? (
+                  <Pause size={28} fill="currentColor" />
+                ) : (
+                  <Play size={28} fill="currentColor" className="ml-1" />
+                )}
               </button>
 
               <div className="flex w-64 items-center justify-end gap-6">
