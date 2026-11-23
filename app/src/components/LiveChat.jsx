@@ -1,17 +1,16 @@
 // src/components/LiveChat.jsx
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Send, Radio, User } from 'lucide-react';
+import { X, Send, Radio } from 'lucide-react';
+import { socket } from '../services/socket'; // Import global socket
 
-const LiveChat = ({ isOpen, onClose, currentShow }) => {
-  const [messages, setMessages] = useState([
-    { id: 1, user: 'Chinedu', text: 'This morning show is fire! 🔥', time: '08:02 AM' },
-    { id: 2, user: 'Amaka', text: 'Tobi is doing a great job today.', time: '08:04 AM' },
-    { id: 3, user: 'Femi', text: 'Please play some Burna Boy next!', time: '08:05 AM' },
-  ]);
+const LiveChat = ({ isOpen, onClose, currentShow, messages, listenerCount }) => {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef(null);
 
-  // Auto-scroll to bottom of chat
+  // Optional: Get the logged-in user's name from your Redux store or local storage
+  // Example: const userName = useSelector((state) => state.auth.userInfo?.name) || 'Guest User';
+  const userName = 'You'; // Replace with real auth name later
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -24,37 +23,34 @@ const LiveChat = ({ isOpen, onClose, currentShow }) => {
     e.preventDefault();
     if (!input.trim()) return;
 
-    const newMessage = {
-      id: Date.now(),
-      user: 'You',
+    // Send message to backend via the imported global socket
+    socket.emit('send_radio_message', {
+      roomId: 'obong_radio_main_studio',
+      user: { name: userName, avatar: null },
       text: input.trim(),
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       isMe: true
-    };
+    });
 
-    setMessages([...messages, newMessage]);
     setInput('');
   };
 
   if (!isOpen) return null;
 
-  // Fallback image just in case
   const fallbackImage = "https://images.unsplash.com/photo-1598488035139-bdbb2231ce04?q=80&w=200&auto=format&fit=crop";
 
   return (
     <>
-      {/* Backdrop */}
+      {/* Mobile Backdrop */}
       <div 
         className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 md:hidden transition-opacity"
         onClick={onClose}
       />
-
+      
       {/* Chat Container */}
       <div className={`
         fixed z-50 flex flex-col bg-zinc-950 border-zinc-800 transition-transform duration-300
-        /* Mobile: Full screen slide up */
         inset-0 md:inset-auto 
-        /* Desktop: Bottom right side drawer */
         md:bottom-24 md:right-6 md:w-[380px] md:h-[600px] md:max-h-[calc(100vh-8rem)] md:rounded-2xl md:border md:shadow-2xl
         ${isOpen ? 'translate-y-0' : 'translate-y-full md:translate-y-0 md:opacity-0 md:pointer-events-none'}
       `}>
@@ -67,7 +63,7 @@ const LiveChat = ({ isOpen, onClose, currentShow }) => {
             </div>
             <div>
               <h2 className="text-[14px] font-bold text-white tracking-wide">Live Chat</h2>
-              <p className="text-[10px] font-medium text-zinc-400">1.2k listening</p>
+              <p className="text-[10px] font-medium text-zinc-400">{listenerCount || 1} listening</p>
             </div>
           </div>
           <button 
@@ -80,7 +76,6 @@ const LiveChat = ({ isOpen, onClose, currentShow }) => {
 
         {/* Now Playing Summary */}
         <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 bg-zinc-900/50 p-3">
-          {/* Updated Image Container */}
           <div className="h-10 w-10 shrink-0 overflow-hidden rounded-md border border-zinc-700 bg-zinc-800">
             <img 
               src={currentShow.image || fallbackImage} 
@@ -97,13 +92,13 @@ const LiveChat = ({ isOpen, onClose, currentShow }) => {
 
         {/* Messages Area */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <div className="text-center text-[10px] font-medium text-zinc-600 uppercase tracking-widest my-2">Today</div>
+          <div className="text-center text-[10px] font-medium text-zinc-600 uppercase tracking-widest my-2">Live Chat</div>
           
-          {messages.map((msg) => (
-            <div key={msg.id} className={`flex flex-col ${msg.isMe ? 'items-end' : 'items-start'}`}>
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`flex flex-col ${msg.isMe ? 'items-end' : 'items-start'}`}>
               <div className="flex items-baseline gap-2 mb-1 px-1">
                 <span className={`text-[11px] font-semibold ${msg.isMe ? 'text-yellow-500' : 'text-zinc-400'}`}>
-                  {msg.user}
+                  {msg.user.name}
                 </span>
                 <span className="text-[9px] text-zinc-600">{msg.time}</span>
               </div>

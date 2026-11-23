@@ -5,7 +5,9 @@ import {
   Play, Pause, Volume2, VolumeX, Share2, Radio as RadioIcon,
   ArrowLeft, MessageSquare, Calendar, Heart, Clock
 } from 'lucide-react';
+import { socket } from '../services/socket'; 
 import LiveChat from '../components/LiveChat'; 
+import { useAudioPlayer } from '../context/AudioPlayerContext';
 
 // =========================================
 // VISUALIZER COMPONENT
@@ -37,14 +39,34 @@ const Visualizer = ({ isPlaying, barCount = 24, height = 'h-16' }) => {
 // =========================================
 const Radio = () => {
   const navigate = useNavigate();
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  const [volume, setVolume] = useState(70);
-  const [isChatOpen, setIsChatOpen] = useState(false);
-
-  const showImage = "https://images.unsplash.com/photo-1598488035139-bdbb2231ce04?q=80&w=1200&auto=format&fit=crop";
   
-  const currentShow = { title: 'Morning Drive Show', host: 'Tobi & Amaka', image: showImage };
+  // 1. Get Audio Player State from Context
+  const { 
+    isPlaying, isMusicMode, currentShow, 
+    volume, isMuted, togglePlay, toggleMute, 
+    handleVolumeChange, showImage 
+  } = useAudioPlayer();
+  
+  // 2. Local State for Live Chat
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [listenerCount, setListenerCount] = useState(0);
+
+  // 3. Socket.io Connection for Live Chat
+  useEffect(() => {
+    socket.emit('join_radio_room', 'obong_radio_main_studio');
+
+    const handleMessage = (msg) => setMessages((prev) => [...prev, msg]);
+    const handleCount = (count) => setListenerCount(count);
+
+    socket.on('receive_radio_message', handleMessage);
+    socket.on('listener_count_update', handleCount);
+
+    return () => {
+      socket.off('receive_radio_message', handleMessage);
+      socket.off('listener_count_update', handleCount);
+    };
+  }, []);
 
   const upcomingShows = [
     { time: '10:00 AM', title: 'Campus Buzz', host: 'Chinedu O.' },
@@ -53,33 +75,31 @@ const Radio = () => {
     { time: '04:00 PM', title: 'Sports Update', host: 'Femi & Co.' },
   ];
 
-  const togglePlay = () => setIsPlaying(!isPlaying);
-
   return (
     <div className="fixed inset-0 z-50 flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 text-white animate-in fade-in duration-500">
       
-      {/* =========================================
-          FULL SCREEN DARKENED BACKGROUND IMAGE
-          ========================================= */}
+      {/* Background Image */}
       <div className="absolute inset-0 z-0 pointer-events-none">
-        <img 
-          src={showImage} 
-          alt="Background" 
-          className="h-full w-full object-cover"
-        />
+        <img src={showImage} alt="Background" className="h-full w-full object-cover" />
         <div className="absolute inset-0 bg-zinc-950/75"></div>
         <div className="absolute inset-0 shadow-[inset_0_0_150px_rgba(0,0,0,0.8)]"></div>
       </div>
 
-      <LiveChat isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} currentShow={currentShow} />
+      <LiveChat 
+        isOpen={isChatOpen} 
+        onClose={() => setIsChatOpen(false)} 
+        currentShow={currentShow} 
+        messages={messages}
+        listenerCount={listenerCount}
+      />
 
       {/* =========================================
           MOBILE VIEW
           ========================================= */}
       <div className="relative z-10 flex h-full w-full flex-col md:hidden">
         
+        {/* Mobile Header */}
         <div className="flex shrink-0 items-center justify-between px-5 pb-2 pt-6">
-          {/* Mobile Back Button -> /home */}
           <button onClick={() => navigate('/home')} className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-900/80 backdrop-blur-md text-zinc-400 border border-zinc-800 active:scale-95 transition-transform">
             <ArrowLeft size={16} />
           </button>
@@ -92,24 +112,25 @@ const Radio = () => {
           </button>
         </div>
 
+        {/* Hero Art Area */}
         <div className="flex flex-1 flex-col items-center justify-center px-6 overflow-hidden min-h-0">
           <div className="relative mb-6 flex aspect-square w-full max-w-[200px] sm:max-w-[240px] items-center justify-center overflow-hidden rounded-2xl border border-zinc-800 shadow-[0_20px_50px_rgba(0,0,0,0.5)]">
-            <img src={showImage} alt="Show Cover" className="absolute inset-0 h-full w-full object-cover" />
+            <img src={currentShow.image} alt="Show Cover" className="absolute inset-0 h-full w-full object-cover" />
             <div className="absolute inset-0 bg-zinc-950/10"></div>
 
             <div className="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-md border border-white/10 bg-black/40 px-2 py-0.5 backdrop-blur-md">
               <span className="relative flex h-1.5 w-1.5">
-                <span className={`absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75 ${isPlaying ? 'animate-ping' : ''}`}></span>
-                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-red-500"></span>
+                <span className={`absolute inline-flex h-full w-full rounded-full ${isMusicMode ? 'bg-yellow-500' : 'bg-red-500'} opacity-75 ${isPlaying ? 'animate-ping' : ''}`}></span>
+                <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${isMusicMode ? 'bg-yellow-500' : 'bg-red-500'}`}></span>
               </span>
-              <span className="text-[8px] font-bold tracking-widest text-white">LIVE</span>
+              <span className="text-[8px] font-bold tracking-widest text-white">{isMusicMode ? 'AUTO DJ' : 'LIVE'}</span>
             </div>
           </div>
 
           <div className="mb-4 w-full text-center">
-            <h1 className="mb-1 font-serif text-2xl tracking-tight text-white drop-shadow-md">{currentShow.title}</h1>
+            <h1 className="mb-1 font-serif text-2xl tracking-tight text-white drop-shadow-md truncate px-4">{currentShow.title}</h1>
             <p className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
-              Hosted by <span className="text-zinc-200">{currentShow.host}</span>
+              {isMusicMode ? 'Playing' : 'Hosted by'} <span className="text-zinc-200">{currentShow.host}</span>
             </p>
           </div>
 
@@ -118,25 +139,27 @@ const Radio = () => {
           </div>
         </div>
 
+        {/* Mobile Bottom Controls */}
         <div className="shrink-0 bg-zinc-900/90 backdrop-blur-xl border-t border-zinc-800/80 pb-safe rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.6)]">
           <div className="flex flex-col px-6 pt-5 pb-6">
+            
             <div className="mb-4">
               <div className="flex justify-between text-[9px] font-bold text-zinc-500 uppercase tracking-widest mb-1.5">
-                <span>Live Stream</span>
-                <span className="text-yellow-500 flex items-center gap-1">On Air</span>
+                <span>{isMusicMode ? 'Auto DJ Queue' : 'Live Stream'}</span>
+                <span className={isMusicMode ? 'text-zinc-400' : 'text-yellow-500'}>{isMusicMode ? 'Playing' : 'On Air'}</span>
               </div>
               <div className="h-1.5 w-full bg-zinc-800/80 rounded-full overflow-hidden">
-                <div className="h-full bg-yellow-500 w-full animate-pulse"></div>
+                <div className={`h-full w-full ${isMusicMode ? 'bg-zinc-600' : 'bg-yellow-500 animate-pulse'}`}></div>
               </div>
             </div>
 
             <div className="flex items-center gap-3 mb-6">
-              <button onClick={() => setIsMuted(!isMuted)} className="text-zinc-500 hover:text-white transition-colors">
+              <button onClick={toggleMute} className="text-zinc-500 hover:text-white transition-colors">
                 {isMuted || volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
               </button>
               <input 
                 type="range" min="0" max="100" value={isMuted ? 0 : volume} 
-                onChange={(e) => { setVolume(Number(e.target.value)); if (isMuted) setIsMuted(false); }} 
+                onChange={handleVolumeChange} 
                 className="h-1 w-full cursor-pointer appearance-none rounded-lg bg-zinc-800/80 accent-yellow-500" 
               />
             </div>
@@ -172,16 +195,15 @@ const Radio = () => {
         <div className="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/60 backdrop-blur-2xl shadow-2xl">
           
           <div className="flex w-full items-center justify-between p-6 border-b border-zinc-800/50">
-            {/* Desktop Back Button -> /home */}
             <button onClick={() => navigate('/home')} className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white transition-colors">
               <ArrowLeft size={14} /> Back to App
             </button>
             <div className="flex items-center gap-2 rounded-md border border-zinc-800/80 bg-zinc-950/80 px-3 py-1">
               <span className="relative flex h-2 w-2">
-                <span className={`absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75 ${isPlaying ? 'animate-ping' : ''}`}></span>
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500"></span>
+                <span className={`absolute inline-flex h-full w-full rounded-full ${isMusicMode ? 'bg-yellow-500' : 'bg-red-500'} opacity-75 ${isPlaying ? 'animate-ping' : ''}`}></span>
+                <span className={`relative inline-flex h-2 w-2 rounded-full ${isMusicMode ? 'bg-yellow-500' : 'bg-red-500'}`}></span>
               </span>
-              <span className="text-[10px] font-bold tracking-widest text-white">ON AIR</span>
+              <span className="text-[10px] font-bold tracking-widest text-white">{isMusicMode ? 'AUTO DJ' : 'ON AIR'}</span>
             </div>
           </div>
 
@@ -189,14 +211,14 @@ const Radio = () => {
             <div className="flex w-full max-w-2xl flex-col items-center gap-8 lg:flex-row lg:gap-12">
               
               <div className="relative flex h-64 w-64 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-zinc-700/50 shadow-[0_20px_50px_rgba(0,0,0,0.6)]">
-                <img src={showImage} alt="Cover" className="h-full w-full object-cover" />
+                <img src={currentShow.image} alt="Cover" className="h-full w-full object-cover" />
               </div>
 
               <div className="flex-1 text-center lg:text-left">
-                <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-yellow-500">Currently Playing</p>
-                <h1 className="mb-3 font-serif text-4xl leading-tight tracking-tight text-white lg:text-5xl drop-shadow-lg">{currentShow.title}</h1>
+                <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-yellow-500">{isMusicMode ? 'Auto DJ Playing' : 'Currently Playing'}</p>
+                <h1 className="mb-3 font-serif text-4xl leading-tight tracking-tight text-white lg:text-5xl drop-shadow-lg line-clamp-2">{currentShow.title}</h1>
                 <p className="mb-6 text-[13px] font-medium text-zinc-400">
-                  Hosted by <span className="text-zinc-200">{currentShow.host}</span> <br/>
+                  {isMusicMode ? 'Artist' : 'Hosted by'} <span className="text-zinc-200">{currentShow.host}</span> <br/>
                   <span className="mt-1 block text-[11px] uppercase tracking-wider text-zinc-500">Obong University Radio 98.5</span>
                 </p>
                 <div className="mx-auto w-full max-w-xs lg:mx-0">
@@ -208,17 +230,17 @@ const Radio = () => {
 
           <div className="border-t border-zinc-800/80 bg-zinc-950/40 backdrop-blur-md">
             <div className="w-full h-1 bg-zinc-800/50">
-               <div className="h-full bg-yellow-500 w-full animate-pulse"></div>
+               <div className={`h-full w-full ${isMusicMode ? 'bg-zinc-600' : 'bg-yellow-500 animate-pulse'}`}></div>
             </div>
             
             <div className="flex items-center justify-between p-6">
               <div className="flex w-64 items-center gap-4">
-                <button onClick={() => setIsMuted(!isMuted)} className="text-zinc-500 hover:text-white transition-colors">
+                <button onClick={toggleMute} className="text-zinc-500 hover:text-white transition-colors">
                   {isMuted || volume === 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
                 </button>
                 <input 
                   type="range" min="0" max="100" value={isMuted ? 0 : volume} 
-                  onChange={(e) => { setVolume(Number(e.target.value)); if (isMuted) setIsMuted(false); }} 
+                  onChange={handleVolumeChange} 
                   className="h-1.5 w-full cursor-pointer appearance-none rounded-lg bg-zinc-800 accent-yellow-500" 
                 />
               </div>
