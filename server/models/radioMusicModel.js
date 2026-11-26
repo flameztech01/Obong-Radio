@@ -22,6 +22,16 @@ const radioMusicSchema = new mongoose.Schema(
     image: {
       type: String,
     },
+    // Length of the track in SECONDS.
+    // Critical for the synchronized "everyone hears the same moment" playback:
+    // the server walks the ordered queue summing durations to figure out
+    // which track is playing and at what offset right now.
+    duration: {
+      type: Number,
+      required: true,
+      default: 180, // fallback if a source omits it
+      min: 1,
+    },
     order: {
       type: Number, // To maintain the playlist sequence
       required: true,

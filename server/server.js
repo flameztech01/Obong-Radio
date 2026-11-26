@@ -8,6 +8,7 @@ import http from "http";
 
 import authRoutes from "./routes/authRoutes.js";
 import radioRoutes from "./routes/radioRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 import { handleLiveKitWebhook } from "./controllers/livekitWebhookController.js";
 import { initSocket } from "./socket.js";
@@ -56,6 +57,7 @@ app.get("/api/health", (req, res) => {
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/radio", radioRoutes);
+app.use("/api/admin", adminRoutes);
 
 // Error Handling
 app.use(notFound);

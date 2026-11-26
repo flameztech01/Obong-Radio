@@ -42,7 +42,8 @@ const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 const MAX_OTP_ATTEMPTS = 5;
 
 /* ---------- helpers ---------- */
-const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
+const generateOtp = () =>
+  Math.floor(100000 + Math.random() * 900000).toString();
 const hashOtp = (otp) => crypto.createHash("sha256").update(otp).digest("hex");
 
 const maskEmail = (email) => {
@@ -92,13 +93,13 @@ const createAndSendOtp = async (user) => {
 
 export const signup = async (req, res) => {
   try {
-    const { 
-      name, 
-      email, 
-      matricNumber, 
+    const {
+      name,
+      email,
+      matricNumber,
       department, // Optional now, depending on if you want them to select it
-      level, 
-      phone, 
+      level,
+      phone,
     } = req.body;
 
     // Name and Email are the only strictly required fields for a Radio App signup
@@ -111,17 +112,20 @@ export const signup = async (req, res) => {
     // Only validate department if one was provided
     if (department) {
       const dept = await Department.findById(department);
-      if (!dept) return res.status(404).json({ message: "Department not found" });
+      if (!dept)
+        return res.status(404).json({ message: "Department not found" });
     }
 
     const emailLower = email.toLowerCase().trim();
-    const matricUpper = matricNumber ? matricNumber.toUpperCase().trim() : undefined;
+    const matricUpper = matricNumber
+      ? matricNumber.toUpperCase().trim()
+      : undefined;
 
     // Find if user already exists
     let user = await User.findOne({
       $or: [
-        { email: emailLower }, 
-        ...(matricUpper ? [{ matricNumber: matricUpper }] : [])
+        { email: emailLower },
+        ...(matricUpper ? [{ matricNumber: matricUpper }] : []),
       ],
     });
 
@@ -140,9 +144,8 @@ export const signup = async (req, res) => {
       user.department = department || null;
       user.level = level ? Number(level) : null;
       user.phone = phone?.trim() || null;
-      
-      await user.save(); // Save the overwritten details
 
+      await user.save(); // Save the overwritten details
     } else {
       // Create a brand new user
       user = await User.create({
@@ -168,13 +171,14 @@ export const signup = async (req, res) => {
     });
   } catch (err) {
     console.error("signup error:", err);
-    
+
     if (err.code === 11000) {
-      return res.status(409).json({ 
-        message: "This email or matric number is already linked to another account." 
+      return res.status(409).json({
+        message:
+          "This email or matric number is already linked to another account.",
       });
     }
-    
+
     return res.status(500).json({ message: "Server error" });
   }
 };
@@ -187,7 +191,9 @@ export const login = async (req, res) => {
   try {
     const { identifier } = req.body;
     if (!identifier) {
-      return res.status(400).json({ message: "Enter your email or matric number" });
+      return res
+        .status(400)
+        .json({ message: "Enter your email or matric number" });
     }
 
     const user = await findUserByIdentifier(identifier);
@@ -196,9 +202,11 @@ export const login = async (req, res) => {
         message: "No account found with that email or matric number",
       });
     }
-    
+
     if (!user.isActive) {
-      return res.status(403).json({ message: "Account deactivated. Contact admin." });
+      return res
+        .status(403)
+        .json({ message: "Account deactivated. Contact admin." });
     }
 
     // Check for 60-second cooldown
@@ -217,7 +225,7 @@ export const login = async (req, res) => {
     return res.json({
       message: "OTP sent to your email",
       email: maskEmail(user.email),
-      identifier: user.email, 
+      identifier: user.email,
     });
   } catch (err) {
     console.error("login error:", err);
@@ -268,7 +276,9 @@ export const verifyOtp = async (req, res) => {
     const { identifier, otp } = req.body;
 
     if (!identifier || !otp) {
-      return res.status(400).json({ message: "Identifier and OTP are required" });
+      return res
+        .status(400)
+        .json({ message: "Identifier and OTP are required" });
     }
     if (!/^\d{6}$/.test(String(otp))) {
       return res.status(400).json({ message: "OTP must be a 6-digit code" });
@@ -280,13 +290,19 @@ export const verifyOtp = async (req, res) => {
       return res.status(403).json({ message: "Account deactivated" });
 
     if (!user.otpHash || !user.otpExpiresAt) {
-      return res.status(400).json({ message: "No active OTP. Please request a new one." });
+      return res
+        .status(400)
+        .json({ message: "No active OTP. Please request a new one." });
     }
     if (new Date(user.otpExpiresAt).getTime() < Date.now()) {
-      return res.status(400).json({ message: "OTP expired. Please request a new one." });
+      return res
+        .status(400)
+        .json({ message: "OTP expired. Please request a new one." });
     }
     if ((user.otpAttempts || 0) >= MAX_OTP_ATTEMPTS) {
-      return res.status(429).json({ message: "Too many failed attempts. Request a new OTP." });
+      return res
+        .status(429)
+        .json({ message: "Too many failed attempts. Request a new OTP." });
     }
 
     if (hashOtp(String(otp)) !== user.otpHash) {
@@ -342,7 +358,10 @@ export const logout = async (req, res) => {
 
 export const getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).populate("department", "name code");
+    const user = await User.findById(req.user.id).populate(
+      "department",
+      "name code",
+    );
     if (!user) return res.status(404).json({ message: "User not found" });
     return res.json({ user: sanitizeUser(user) });
   } catch (err) {
@@ -362,10 +381,15 @@ export const updateProfilePicture = async (req, res) => {
       return res.status(400).json({ message: "No image file provided" });
     }
 
-    const user = await User.findById(req.user.id).select("+profilePicturePublicId");
+    const user = await User.findById(req.user.id).select(
+      "+profilePicturePublicId",
+    );
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const upload = await uploadFileToCloudinary(file, "school_portal/profile_pictures");
+    const upload = await uploadFileToCloudinary(
+      file,
+      "school_portal/profile_pictures",
+    );
 
     if (user.profilePicturePublicId) {
       await deleteFromCloudinary(user.profilePicturePublicId);
@@ -381,13 +405,17 @@ export const updateProfilePicture = async (req, res) => {
     });
   } catch (err) {
     console.error("updateProfilePicture error:", err);
-    return res.status(500).json({ message: "Failed to upload profile picture" });
+    return res
+      .status(500)
+      .json({ message: "Failed to upload profile picture" });
   }
 };
 
 export const deleteProfilePicture = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select("+profilePicturePublicId");
+    const user = await User.findById(req.user.id).select(
+      "+profilePicturePublicId",
+    );
     if (!user) return res.status(404).json({ message: "User not found" });
 
     if (user.profilePicturePublicId) {
@@ -411,7 +439,9 @@ export const deleteProfilePicture = async (req, res) => {
 
 export const deleteAccount = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select("+profilePicturePublicId");
+    const user = await User.findById(req.user.id).select(
+      "+profilePicturePublicId",
+    );
     if (!user) return res.status(404).json({ message: "User not found" });
 
     if (user.profilePicturePublicId) {
@@ -419,9 +449,9 @@ export const deleteAccount = async (req, res) => {
     }
 
     await User.deleteOne({ _id: user._id });
-    
+
     res.cookie("jwt", "", { httpOnly: true, expires: new Date(0) });
-    
+
     return res.json({ message: "Account deleted successfully" });
   } catch (err) {
     console.error("deleteAccount error:", err);

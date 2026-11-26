@@ -3,154 +3,72 @@ import mongoose from "mongoose";
 
 const userSchema = new mongoose.Schema(
   {
-    // ==========================================
-    // BASIC INFO
-    // ==========================================
-    name: {
-      type: String,
-      required: [true, "Name is required"],
-      trim: true,
-    },
-    email: {
-      type: String,
-      required: [true, "Email is required"],
-      unique: true,
-      lowercase: true,
-      trim: true,
-    },
-    phone: {
-      type: String,
-      trim: true,
-      default: null,
-    },
+    /* BASIC */
+    name:  { type: String, required: [true, "Name is required"], trim: true },
+    email: { type: String, required: [true, "Email is required"], unique: true, lowercase: true, trim: true },
+    phone: { type: String, trim: true, default: null },
 
-    // ==========================================
-    // ACADEMIC / IDENTIFICATION
-    // (Sparse allows multiple nulls for guests/admins who don't have these)
-    // ==========================================
-    matricNumber: {
-      type: String,
-      unique: true,
-      sparse: true, 
-      uppercase: true,
-      trim: true,
-    },
-    staffId: {
-      type: String,
-      unique: true,
-      sparse: true,
-      uppercase: true,
-      trim: true,
-    },
+    /* ACADEMIC (sparse → guests/admins can exist without these) */
+    matricNumber: { type: String, unique: true, sparse: true, uppercase: true, trim: true },
+    staffId:      { type: String, unique: true, sparse: true, uppercase: true, trim: true },
+
     department: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Department",
-      required: [true, "Department is required"],
-    },
-    level: {
-      type: Number,
-      enum: [100, 200, 300, 400, 500],
       default: null,
+      // Required only for student/staff — DJs, admins, moderators, guests can be dept-less
+      required: function () {
+        return this.role === "student" || this.role === "staff";
+      },
     },
+    level: { type: Number, enum: [100, 200, 300, 400, 500], default: null },
 
-    // ==========================================
-    // ROLES & PERMISSIONS
-    // ==========================================
+    /* ROLES */
     role: {
       type: String,
-      enum: ["student", "admin", "super_admin", "guest"],
+      enum: ["student", "staff", "dj", "moderator", "admin", "super_admin", "guest"],
       default: "student",
     },
-    extraRoles: {
-      type: [String],
-      default: [],
-    },
-    // Used if an admin needs restricted access to specific levels/departments
+    extraRoles: { type: [String], default: [] },
     scope: {
-      levels: {
-        type: [Number],
-        default: [],
-      },
-      departments: [
-        {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: "Department",
-        },
-      ],
+      levels:      { type: [Number], default: [] },
+      departments: [{ type: mongoose.Schema.Types.ObjectId, ref: "Department" }],
     },
 
-    // ==========================================
-    // PROFILE PICTURE (Cloudinary)
-    // ==========================================
-    profilePicture: {
-      type: String,
-      default: null,
-    },
-    // Hidden by default, requires .select('+profilePicturePublicId') to fetch
-    profilePicturePublicId: {
-      type: String,
-      select: false, 
-    },
+    /* PROFILE PICTURE */
+    profilePicture:         { type: String, default: null },
+    profilePicturePublicId: { type: String, select: false },
 
-    // ==========================================
-    // ACADEMIC FLAGS (For Transfer/Historical Results)
-    // ==========================================
-    isTransferStudent: {
-      type: Boolean,
-      default: false,
-    },
-    hasUploadedHistoricalResults: {
-      type: Boolean,
-      default: false,
-    },
-    transferCgpa: {
-      type: Number,
-      default: null,
-    },
+    /* ACADEMIC FLAGS */
+    isTransferStudent:          { type: Boolean, default: false },
+    hasUploadedHistoricalResults: { type: Boolean, default: false },
+    transferCgpa:               { type: Number, default: null },
 
-    // ==========================================
-    // AUTHENTICATION & OTP
-    // ==========================================
-    isEmailVerified: {
-      type: Boolean,
-      default: false,
-    },
-    isActive: {
-      type: Boolean,
-      default: true,
-    },
-    otpHash: {
-      type: String,
-      default: undefined,
-    },
-    otpExpiresAt: {
-      type: Date,
-      default: undefined,
-    },
-    otpAttempts: {
-      type: Number,
-      default: 0,
-    },
-    otpLastSentAt: {
-      type: Date,
-      default: undefined,
-    },
-    lastLoginAt: {
-      type: Date,
-      default: null,
-    },
+    /* AUTH & OTP */
+    isEmailVerified: { type: Boolean, default: false },
+    isActive:        { type: Boolean, default: true },
+    otpHash:         { type: String, default: undefined },
+    otpExpiresAt:    { type: Date,   default: undefined },
+    otpAttempts:     { type: Number, default: 0 },
+    otpLastSentAt:   { type: Date,   default: undefined },
+    lastLoginAt:     { type: Date,   default: null },
   },
   {
-    timestamps: true, // Automatically adds createdAt and updatedAt
+    timestamps: true,
+    toJSON:   { virtuals: true },
+    toObject: { virtuals: true },
   }
 );
 
-// ==========================================
-// INDEXES FOR PERFORMANCE
-// ==========================================
+/* ---- VIRTUAL: isAdmin (backed by role, single source of truth) ---- */
+userSchema.virtual("isAdmin").get(function () {
+  return this.role === "admin" || this.role === "super_admin";
+});
+
+/* ---- INDEXES ---- */
 userSchema.index({ department: 1, role: 1 });
 userSchema.index({ isActive: 1 });
+userSchema.index({ role: 1 }); // speeds up /admin/users?role=dj
 
 const User = mongoose.model("User", userSchema);
-
 export default User;

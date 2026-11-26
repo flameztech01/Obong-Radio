@@ -1,8 +1,11 @@
 // controllers/radioController.js
 import { AccessToken, EgressClient } from 'livekit-server-sdk';
 import { v2 as cloudinary } from "cloudinary";
+import mongoose from 'mongoose';
 import RadioSession from '../models/radioSessionModel.js';
 import RadioMusic from '../models/radioMusicModel.js';
+import RadioState from '../models/radioStateModel.js';
+import { getIO } from '../socket.js';
 
 const egressClient = new EgressClient(
   process.env.LIVEKIT_URL,
@@ -12,31 +15,27 @@ const egressClient = new EgressClient(
 
 const MAIN_ROOM = "obong_radio_main_studio";
 
-// Auto-DJ settings
-const MIN_AUTO_TRACKS = 8;                  // refetch if fewer auto tracks than this
-const REFRESH_MS = 6 * 60 * 60 * 1000;      // refetch every 6 hours
-const AUDIUS_HOST = 'https://api.audius.co';
+/* ============================================================
+   AUTO-DJ SETTINGS
+   ============================================================ */
+const MIN_AUTO_TRACKS = 8;
+const REFRESH_MS      = 6 * 60 * 60 * 1000;
+const AUDIUS_HOST     = 'https://api.audius.co';
 const AUDIUS_APP_NAME = 'OBONG_RADIO';
-const DEFAULT_COVER = 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=200';
+const DEFAULT_COVER   = 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=200';
+const DEFAULT_DURATION = 180; // seconds — used only when a source omits duration
 
-let isFetchingMusic = false;
-let lastMusicRefresh = 0;
+let isFetchingMusic   = false;
+let lastMusicRefresh  = 0;
 
 /* ============================================================
    CLOUDINARY HELPER
    ============================================================ */
 const uploadFileToCloudinary = async (fileBuffer, folder, resourceType = "image", options = {}) => {
   if (!fileBuffer) return null;
-
   return new Promise((resolve, reject) => {
-    const uploadOptions = {
-      folder,
-      resource_type: resourceType,
-      ...options,
-    };
-
     cloudinary.uploader
-      .upload_stream(uploadOptions, (error, result) => {
+      .upload_stream({ folder, resource_type: resourceType, ...options }, (error, result) => {
         if (error) reject(error);
         else resolve(result);
       })
@@ -45,25 +44,20 @@ const uploadFileToCloudinary = async (fileBuffer, folder, resourceType = "image"
 };
 
 /* ============================================================
-   HELPER: CREATE LIVEKIT ACCESS TOKEN
+   LIVEKIT TOKEN HELPER
    ============================================================ */
 const createLiveKitToken = async (identity, name, role, isAdmin = false) => {
   const canPublish = isAdmin || role === 'guest';
-
   const at = new AccessToken(process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET, {
-    identity: identity,
-    name: name,
-    ttl: '6h',
+    identity, name, ttl: '6h',
   });
-
   at.addGrant({
     roomJoin: true,
     room: MAIN_ROOM,
-    canPublish: canPublish,
+    canPublish,
     canSubscribe: true,
     canPublishData: true,
   });
-
   return await at.toJwt();
 };
 
@@ -79,7 +73,6 @@ const shuffle = (arr) => {
   return a;
 };
 
-// Audius: independent artists, lots of Afrobeats uploads. Free streaming API.
 const fetchMusicFromAudius = async () => {
   const queries = ['afrobeats', 'afrobeat', 'afropop', 'naija', 'afro fusion'];
   const results = [];
@@ -93,11 +86,9 @@ const fetchMusicFromAudius = async () => {
         continue;
       }
       const json = await response.json();
-      const tracks = json?.data || [];
-
-      for (const t of tracks) {
-        const genreOk = /afro/i.test(t.genre || '') || /afro|naija/i.test(`${t.title} ${(t.tags || '')}`);
-        const longEnough = (t.duration || 0) >= 90; // skip snippets/intros
+      for (const t of json?.data || []) {
+        const genreOk   = /afro/i.test(t.genre || '') || /afro|naija/i.test(`${t.title} ${(t.tags || '')}`);
+        const longEnough = (t.duration || 0) >= 90;
         if (!genreOk || !longEnough || t.is_streamable === false) continue;
 
         results.push({
@@ -106,17 +97,16 @@ const fetchMusicFromAudius = async () => {
           artist_name: t.user?.name || 'Unknown Artist',
           audio: `${AUDIUS_HOST}/v1/tracks/${t.id}/stream?app_name=${AUDIUS_APP_NAME}`,
           image: t.artwork?.['480x480'] || t.artwork?.['150x150'] || DEFAULT_COVER,
+          duration: Number(t.duration) || 0, // Audius returns seconds
         });
       }
     } catch (error) {
       console.error(`Audius error for "${q}":`, error.message);
     }
   }
-
   return results;
 };
 
-// Jamendo: smaller catalog, used as a supplement
 const fetchMusicFromJamendo = async () => {
   const clientId = process.env.JAMENDO_CLIENT_ID;
   if (!clientId) return [];
@@ -138,17 +128,16 @@ const fetchMusicFromJamendo = async () => {
           artist_name: s.artist_name,
           audio: s.audio,
           image: s.image || DEFAULT_COVER,
+          duration: Number(s.duration) || 0, // Jamendo returns seconds
         });
       }
     } catch (error) {
       console.error(`Jamendo error for "${tag}":`, error.message);
     }
   }
-
   return results;
 };
 
-// Merge all sources, dedupe by title+artist, shuffle
 const fetchAfrobeatTracks = async (limit = 25) => {
   const [audius, jamendo] = await Promise.all([fetchMusicFromAudius(), fetchMusicFromJamendo()]);
   console.log(`Fetched ${audius.length} from Audius, ${jamendo.length} from Jamendo`);
@@ -161,15 +150,14 @@ const fetchAfrobeatTracks = async (limit = 25) => {
     seen.add(key);
     merged.push(song);
   }
-
   return shuffle(merged).slice(0, limit);
 };
 
 const FALLBACK_TRACKS = [
-  { id: 'f1', name: 'Fallback Track 1', artist_name: 'Auto DJ', audio: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', image: DEFAULT_COVER },
-  { id: 'f2', name: 'Fallback Track 2', artist_name: 'Auto DJ', audio: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3', image: DEFAULT_COVER },
-  { id: 'f3', name: 'Fallback Track 3', artist_name: 'Auto DJ', audio: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3', image: DEFAULT_COVER },
-  { id: 'f4', name: 'Fallback Track 4', artist_name: 'Auto DJ', audio: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3', image: DEFAULT_COVER },
+  { id: 'f1', name: 'Fallback Track 1', artist_name: 'Auto DJ', audio: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', image: DEFAULT_COVER, duration: 372 },
+  { id: 'f2', name: 'Fallback Track 2', artist_name: 'Auto DJ', audio: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3', image: DEFAULT_COVER, duration: 330 },
+  { id: 'f3', name: 'Fallback Track 3', artist_name: 'Auto DJ', audio: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3', image: DEFAULT_COVER, duration: 284 },
+  { id: 'f4', name: 'Fallback Track 4', artist_name: 'Auto DJ', audio: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3', image: DEFAULT_COVER, duration: 358 },
 ];
 
 const toQueueDoc = (song, index) => ({
@@ -178,19 +166,81 @@ const toQueueDoc = (song, index) => ({
   artist: song.artist_name,
   audioUrl: song.audio,
   image: song.image || DEFAULT_COVER,
-  order: 1000 + index, // auto tracks come after admin-uploaded ones (which use 0..n)
+  duration: Number(song.duration) || DEFAULT_DURATION,
+  order: 1000 + index,
   isActive: true,
   source: 'auto',
 });
 
 const loadQueue = () => RadioMusic.find({ isActive: true }).sort({ order: 1 }).lean();
 
-// Guarantees a decent queue exists, and refreshes it when it is thin or stale
+/* ============================================================
+   PLAYBACK TIMELINE HELPERS (synchronized for ALL listeners)
+   ============================================================ */
+const getOrCreateState = async () => {
+  let state = await RadioState.findOne({ key: 'global' });
+  if (!state) {
+    state = await RadioState.create({ key: 'global', playlistStartedAt: new Date() });
+  }
+  return state;
+};
+
+const resetTimeline = async (startedAt = new Date()) => {
+  await RadioState.updateOne(
+    { key: 'global' },
+    { playlistStartedAt: startedAt },
+    { upsert: true }
+  );
+};
+
+const trackDurationSec = (t) => Math.max(1, Number(t.duration) || DEFAULT_DURATION);
+
+/**
+ * Given the queue and the epoch, return which track should be playing right now
+ * and the number of seconds into it. Pure math → identical for all callers.
+ */
+const computeNowPlaying = (queue, startedAt) => {
+  if (!queue || queue.length === 0) {
+    return { track: null, index: -1, offsetSec: 0, durationSec: 0, nextTrack: null };
+  }
+
+  const totalSec = queue.reduce((sum, t) => sum + trackDurationSec(t), 0);
+  const elapsedSec = Math.max(0, (Date.now() - new Date(startedAt).getTime()) / 1000);
+  let positionSec = elapsedSec % totalSec;
+
+  for (let i = 0; i < queue.length; i++) {
+    const dur = trackDurationSec(queue[i]);
+    if (positionSec < dur) {
+      return {
+        track: queue[i],
+        index: i,
+        offsetSec: positionSec,
+        durationSec: dur,
+        nextTrack: queue[(i + 1) % queue.length],
+      };
+    }
+    positionSec -= dur;
+  }
+
+  return { track: queue[0], index: 0, offsetSec: 0, durationSec: trackDurationSec(queue[0]), nextTrack: queue[1] || null };
+};
+
+const formatNowPlaying = (np) => ({
+  track: np.track,
+  index: np.index,
+  offsetSec: Math.floor(np.offsetSec),         // how far into the track (seconds)
+  durationSec: np.durationSec,
+  nextTrack: np.nextTrack,
+});
+
+/* ============================================================
+   QUEUE LOADER (with auto-refresh + timeline reset)
+   ============================================================ */
 const ensureMusicQueueExists = async () => {
   let queue = await loadQueue();
 
   const autoCount = queue.filter((t) => t.source !== 'admin').length;
-  const stale = Date.now() - lastMusicRefresh > REFRESH_MS;
+  const stale     = Date.now() - lastMusicRefresh > REFRESH_MS;
   const needsRefresh = autoCount < MIN_AUTO_TRACKS || stale;
 
   if (!needsRefresh) return queue;
@@ -206,15 +256,16 @@ const ensureMusicQueueExists = async () => {
     const songs = await fetchAfrobeatTracks(25);
 
     if (songs.length >= MIN_AUTO_TRACKS) {
-      // Replace only auto tracks. Admin uploads are never touched.
       await RadioMusic.deleteMany({ source: { $ne: 'admin' } });
       await RadioMusic.insertMany(songs.map(toQueueDoc));
       lastMusicRefresh = Date.now();
-      console.log(`Saved ${songs.length} Afrobeat tracks to queue.`);
+      // New queue → reset the epoch so everyone jumps to track 0 together.
+      await resetTimeline(new Date());
+      console.log(`Saved ${songs.length} Afrobeat tracks and reset the timeline.`);
     } else if (queue.length === 0) {
-      // Nothing at all to play: last resort so the radio is never silent
       console.log("Sources returned too few songs and queue is empty. Using fallback tracks.");
       await RadioMusic.insertMany(FALLBACK_TRACKS.map(toQueueDoc));
+      await resetTimeline(new Date());
     } else {
       console.log(`Only ${songs.length} songs fetched, keeping existing queue.`);
     }
@@ -267,14 +318,11 @@ export const startLiveSession = async (req, res) => {
             case: 'http',
             value: {
               url: `${process.env.BACKEND_URL}/api/radio/webhook/recording-complete`,
-              headers: { 'x-session-id': session._id.toString() }
-            }
-          }
-        }
-      }, {
-        layout: 'grid',
-        audioOnly: true,
-      });
+              headers: { 'x-session-id': session._id.toString() },
+            },
+          },
+        },
+      }, { layout: 'grid', audioOnly: true });
 
       session.egressId = egressInfo.egressId;
       await session.save();
@@ -288,7 +336,7 @@ export const startLiveSession = async (req, res) => {
       message: "Live session started",
       sessionId: session._id,
       roomName: MAIN_ROOM,
-      token: token,
+      token,
     });
   } catch (err) {
     console.error("startLiveSession error:", err);
@@ -297,23 +345,25 @@ export const startLiveSession = async (req, res) => {
 };
 
 /* ============================================================
-   2. END LIVE SESSION (Admin Only)
+   2. END LIVE SESSION (Admin Only) — survives bad/missing IDs
    ============================================================ */
 export const endLiveSession = async (req, res) => {
   try {
-    const { sessionId } = req.body;
-    const session = await RadioSession.findById(sessionId);
-    if (!session) return res.status(404).json({ message: "Session not found" });
+    const { sessionId } = req.body || {};
+    let session = null;
+
+    if (sessionId && mongoose.Types.ObjectId.isValid(String(sessionId))) {
+      session = await RadioSession.findById(sessionId);
+    }
+    if (!session) session = await RadioSession.findOne({ status: 'live' });
+    if (!session) return res.status(404).json({ message: "No active session to end" });
 
     if (session.egressId) {
-      try {
-        await egressClient.stopEgress(session.egressId);
-      } catch (err) {
-        console.error("Failed to stop egress:", err);
-      }
+      try { await egressClient.stopEgress(session.egressId); }
+      catch (err) { console.error("Failed to stop egress:", err); }
     }
 
-    session.status = 'ended';
+    session.status  = 'ended';
     session.endedAt = new Date();
     await session.save();
 
@@ -325,38 +375,51 @@ export const endLiveSession = async (req, res) => {
 };
 
 /* ============================================================
-   3. GET LISTENER TOKEN (Returns Live Session OR Music mode)
+   3. LISTENER TOKEN
    ============================================================ */
 export const getListenerToken = async (req, res) => {
   try {
     const user = req.user;
     const identity = user ? user.id : `anon_${Date.now()}`;
-    const name = user ? user.name : 'Anonymous Listener';
+    const name     = user ? user.name : 'Anonymous Listener';
+    const isAdmin  = !!user && (user.role === 'admin' || user.isAdmin === true);
 
     const activeSession = await RadioSession.findOne({ status: 'live' }).populate('host', 'name');
 
+    // No live show → return synchronized music state (auto-DJ)
     if (!activeSession) {
       const queue = await ensureMusicQueueExists();
+      const state = await getOrCreateState();
+      const np    = computeNowPlaying(queue, state.playlistStartedAt);
 
       return res.status(200).json({
         active: false,
-        message: "No live session. Auto-playing Afrobeat.",
-        musicQueue: queue
+        mode: 'music',
+        message: "No live session. Auto-playing synchronized Afrobeat.",
+        queue,
+        nowPlaying: formatNowPlaying(np),
+        serverTime: Date.now(),
       });
     }
 
-    const token = await createLiveKitToken(identity, name, 'listener', false);
+    const token = await createLiveKitToken(
+      identity,
+      name,
+      isAdmin ? 'admin' : 'listener',
+      isAdmin
+    );
 
     return res.status(200).json({
       active: true,
-      token: token,
+      token,
       roomName: MAIN_ROOM,
+      sessionId: activeSession._id.toString(),   // <-- needed by End-Session
       session: {
         title: activeSession.title,
         hostName: activeSession.host.name,
         posterImage: activeSession.posterImage,
         isVideoEnabled: activeSession.isVideoEnabled,
-      }
+      },
     });
   } catch (err) {
     console.error("getListenerToken error:", err);
@@ -365,14 +428,40 @@ export const getListenerToken = async (req, res) => {
 };
 
 /* ============================================================
-   4. GET MUSIC QUEUE (Guaranteed to return music)
+   4. GET MUSIC QUEUE (with synchronized nowPlaying)
    ============================================================ */
 export const getMusicQueue = async (req, res) => {
   try {
     const queue = await ensureMusicQueueExists();
-    return res.status(200).json({ queue });
+    const state = await getOrCreateState();
+    const np    = computeNowPlaying(queue, state.playlistStartedAt);
+
+    return res.status(200).json({
+      queue,
+      nowPlaying: formatNowPlaying(np),
+      serverTime: Date.now(),
+    });
   } catch (err) {
     console.error("getMusicQueue error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+/* ============================================================
+   4a. LIGHTWEIGHT NOW-PLAYING (for client sync polling)
+   ============================================================ */
+export const getNowPlaying = async (req, res) => {
+  try {
+    const queue = await ensureMusicQueueExists();
+    const state = await getOrCreateState();
+    const np    = computeNowPlaying(queue, state.playlistStartedAt);
+
+    return res.status(200).json({
+      nowPlaying: formatNowPlaying(np),
+      serverTime: Date.now(),
+    });
+  } catch (err) {
+    console.error("getNowPlaying error:", err);
     return res.status(500).json({ message: "Server error" });
   }
 };
@@ -384,7 +473,16 @@ export const refreshMusicQueue = async (req, res) => {
   try {
     lastMusicRefresh = 0; // mark stale so ensureMusicQueueExists refetches
     const queue = await ensureMusicQueueExists();
-    return res.status(200).json({ message: "Queue refreshed", count: queue.length, queue });
+    const state = await getOrCreateState();
+    const np    = computeNowPlaying(queue, state.playlistStartedAt);
+
+    return res.status(200).json({
+      message: "Queue refreshed",
+      count: queue.length,
+      queue,
+      nowPlaying: formatNowPlaying(np),
+      serverTime: Date.now(),
+    });
   } catch (err) {
     console.error("refreshMusicQueue error:", err);
     return res.status(500).json({ message: "Server error" });
@@ -393,17 +491,16 @@ export const refreshMusicQueue = async (req, res) => {
 
 /* ============================================================
    4c. UPLOAD YOUR OWN TRACK (Admin Only)
-   Expects multipart form: field "audio" (file), optional "cover" (image),
-   body: title, artist
+   Body: title, artist, duration (seconds). Files: audio (required), cover (optional)
    ============================================================ */
 export const uploadMusicTrack = async (req, res) => {
   try {
     const audioFile = req.files?.audio?.[0];
     const coverFile = req.files?.cover?.[0];
-    const { title, artist } = req.body;
+    const { title, artist, duration } = req.body;
 
     if (!audioFile) return res.status(400).json({ message: "Audio file is required" });
-    if (!title) return res.status(400).json({ message: "Title is required" });
+    if (!title)     return res.status(400).json({ message: "Title is required" });
 
     const audioUpload = await uploadFileToCloudinary(
       audioFile.buffer,
@@ -425,10 +522,17 @@ export const uploadMusicTrack = async (req, res) => {
       artist: artist || 'Unknown Artist',
       audioUrl: audioUpload.secure_url,
       image,
+      duration: Number(duration) || DEFAULT_DURATION,
       order: adminCount, // admin tracks sit at the front of the queue
       isActive: true,
       source: 'admin',
     });
+
+    // New track changed the playlist length → re-anchor the epoch
+    // so clients don't jump mid-song when the total duration changed.
+    // (We simply start the timeline at the current moment; all clients
+    //  will then re-sync from track 0 on next fetch.)
+    await resetTimeline(new Date());
 
     return res.status(201).json({ message: "Track added", track });
   } catch (err) {
@@ -438,16 +542,67 @@ export const uploadMusicTrack = async (req, res) => {
 };
 
 /* ============================================================
-   4d. DELETE A TRACK FROM THE QUEUE (Admin Only)
+   4d. DELETE A TRACK (Admin Only)
    ============================================================ */
 export const deleteMusicTrack = async (req, res) => {
   try {
     const { id } = req.params;
     const deleted = await RadioMusic.findByIdAndDelete(id);
     if (!deleted) return res.status(404).json({ message: "Track not found" });
+
+    // Playlist length changed → re-anchor epoch for a clean re-sync.
+    await resetTimeline(new Date());
+
     return res.status(200).json({ message: "Track removed" });
   } catch (err) {
     console.error("deleteMusicTrack error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+/* ============================================================
+   4e. PLAY NOW (Admin Only) — force a specific track to play for EVERYONE
+   ============================================================ */
+export const setCurrentTrack = async (req, res) => {
+  try {
+    const { trackId } = req.body || {};
+    if (!trackId) return res.status(400).json({ message: "trackId is required" });
+
+    const queue = await loadQueue();
+    const idx = queue.findIndex(
+      (t) => String(t._id) === String(trackId) || t.trackId === String(trackId)
+    );
+    if (idx === -1) return res.status(404).json({ message: "Track not in queue" });
+
+    // Position (in seconds) of the selected track's start within the playlist.
+    const beforeSec = queue
+      .slice(0, idx)
+      .reduce((sum, t) => sum + trackDurationSec(t), 0);
+
+    // Shift the epoch backwards by that many seconds → "now" points at offset 0 of the chosen track.
+    const startedAt = new Date(Date.now() - beforeSec * 1000);
+    await resetTimeline(startedAt);
+
+    const np = computeNowPlaying(queue, startedAt);
+
+    // Broadcast to everyone currently listening so their players jump instantly.
+    try {
+      const io = getIO();
+      io.to(MAIN_ROOM).emit('radio:track_changed', {
+        nowPlaying: formatNowPlaying(np),
+        serverTime: Date.now(),
+      });
+    } catch (e) {
+      console.warn("Socket broadcast failed (this is fine if socket isn't ready):", e.message);
+    }
+
+    return res.status(200).json({
+      message: "Now playing updated for all listeners",
+      nowPlaying: formatNowPlaying(np),
+      serverTime: Date.now(),
+    });
+  } catch (err) {
+    console.error("setCurrentTrack error:", err);
     return res.status(500).json({ message: "Server error" });
   }
 };
@@ -466,7 +621,7 @@ export const generateGuestLink = async (req, res) => {
     return res.status(200).json({
       token,
       roomName: MAIN_ROOM,
-      expiresIn: "6 hours"
+      expiresIn: "6 hours",
     });
   } catch (err) {
     console.error("generateGuestLink error:", err);
@@ -475,7 +630,7 @@ export const generateGuestLink = async (req, res) => {
 };
 
 /* ============================================================
-   6. RECORDING WEBHOOK (Receives Audio & Uploads to Cloudinary)
+   6. RECORDING WEBHOOK
    ============================================================ */
 export const handleRecordingWebhook = async (req, res) => {
   try {
@@ -487,9 +642,7 @@ export const handleRecordingWebhook = async (req, res) => {
       fileBuffer = req.body;
     } else {
       const chunks = [];
-      for await (const chunk of req) {
-        chunks.push(chunk);
-      }
+      for await (const chunk of req) chunks.push(chunk);
       fileBuffer = Buffer.concat(chunks);
     }
 
@@ -504,9 +657,7 @@ export const handleRecordingWebhook = async (req, res) => {
       { format: 'mp3' }
     );
 
-    await RadioSession.findByIdAndUpdate(sessionId, {
-      recordingUrl: upload.secure_url,
-    });
+    await RadioSession.findByIdAndUpdate(sessionId, { recordingUrl: upload.secure_url });
 
     return res.status(200).send("OK");
   } catch (err) {
@@ -516,13 +667,13 @@ export const handleRecordingWebhook = async (req, res) => {
 };
 
 /* ============================================================
-   7. GET PAST SESSIONS (For Replays / Recent Broadcasts)
+   7. PAST SESSIONS
    ============================================================ */
 export const getPastSessions = async (req, res) => {
   try {
     const sessions = await RadioSession.find({
       status: 'ended',
-      recordingUrl: { $ne: null }
+      recordingUrl: { $ne: null },
     })
       .sort({ endedAt: -1 })
       .limit(5)
