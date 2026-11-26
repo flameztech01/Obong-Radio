@@ -5,19 +5,18 @@ const RADIO_URL = "/radio";
 
 export const radioApiSlice = apiSlice.injectEndpoints({
   endpoints: (builder) => ({
-    // ==========================================
-    // LIVE SESSION (Admin)
-    // ==========================================
+    /* ==========================================
+       LIVE SESSION (Admin)
+       ========================================== */
     startLiveSession: builder.mutation({
       query: (formData) => ({
         url: `${RADIO_URL}/start-session`,
         method: "POST",
-        body: formData, // FormData: poster (file), title, description, isVideoEnabled
+        body: formData,
       }),
       invalidatesTags: ["RadioSession"],
     }),
     endLiveSession: builder.mutation({
-      // sessionId is optional now — backend falls back to "the live one"
       query: (sessionId) => ({
         url: `${RADIO_URL}/end-session`,
         method: "POST",
@@ -32,10 +31,9 @@ export const radioApiSlice = apiSlice.injectEndpoints({
       }),
     }),
 
-    // ==========================================
-    // MUSIC MANAGEMENT (Admin)
-    // ==========================================
-    // Upload a track: FormData with audio (required), cover (optional), title, artist, duration
+    /* ==========================================
+       MUSIC MANAGEMENT (Admin)
+       ========================================== */
     uploadMusicTrack: builder.mutation({
       query: (formData) => ({
         url: `${RADIO_URL}/music/upload`,
@@ -44,8 +42,6 @@ export const radioApiSlice = apiSlice.injectEndpoints({
       }),
       invalidatesTags: ["MusicQueue", "NowPlaying"],
     }),
-
-    // Force the auto-queue to refetch from Audius/Jamendo
     refreshMusicQueue: builder.mutation({
       query: () => ({
         url: `${RADIO_URL}/music/refresh`,
@@ -53,8 +49,6 @@ export const radioApiSlice = apiSlice.injectEndpoints({
       }),
       invalidatesTags: ["MusicQueue", "NowPlaying"],
     }),
-
-    // Jump everyone to a specific track. Body: { trackId }
     setCurrentTrack: builder.mutation({
       query: ({ trackId }) => ({
         url: `${RADIO_URL}/music/play`,
@@ -63,8 +57,6 @@ export const radioApiSlice = apiSlice.injectEndpoints({
       }),
       invalidatesTags: ["NowPlaying"],
     }),
-
-    // Delete an admin-uploaded track (by Mongo _id)
     deleteMusicTrack: builder.mutation({
       query: (id) => ({
         url: `${RADIO_URL}/music/${id}`,
@@ -73,9 +65,9 @@ export const radioApiSlice = apiSlice.injectEndpoints({
       invalidatesTags: ["MusicQueue", "NowPlaying"],
     }),
 
-    // ==========================================
-    // LISTENER / PUBLIC
-    // ==========================================
+    /* ==========================================
+       LISTENER / PUBLIC
+       ========================================== */
     getListenerToken: builder.query({
       query: () => ({
         url: `${RADIO_URL}/listener-token`,
@@ -84,8 +76,6 @@ export const radioApiSlice = apiSlice.injectEndpoints({
       keepUnusedDataFor: 0,
       providesTags: ["RadioSession"],
     }),
-
-    // Full queue + current synchronized nowPlaying snapshot
     getMusicQueue: builder.query({
       query: () => ({
         url: `${RADIO_URL}/music/queue`,
@@ -93,20 +83,30 @@ export const radioApiSlice = apiSlice.injectEndpoints({
       }),
       providesTags: ["MusicQueue", "NowPlaying"],
     }),
-
-    // Lightweight nowPlaying poll (used every ~30–60s to re-sync)
     getNowPlaying: builder.query({
       query: () => ({
         url: `${RADIO_URL}/music/now`,
         method: "GET",
       }),
       providesTags: ["NowPlaying"],
-      keepUnusedDataFor: 0, // never cache — always fetch fresh offset
+      keepUnusedDataFor: 0,
     }),
 
-    // ==========================================
-    // HISTORICAL
-    // ==========================================
+    /* ==========================================
+       PUBLIC SCHEDULE (Radio.jsx "Up Next")
+       ========================================== */
+    getSchedule: builder.query({
+      query: () => ({
+        url: `${RADIO_URL}/schedule`,
+        method: "GET",
+      }),
+      providesTags: ["Schedule"],
+      keepUnusedDataFor: 60,
+    }),
+
+    /* ==========================================
+       HISTORICAL
+       ========================================== */
     getPastSessions: builder.query({
       query: () => ({
         url: `${RADIO_URL}/sessions`,
@@ -131,7 +131,10 @@ export const {
   useGetListenerTokenQuery,
   useGetMusicQueueQuery,
   useGetNowPlayingQuery,
-  useLazyGetNowPlayingQuery, // handy for imperative "poll now" after socket events
+  useLazyGetNowPlayingQuery,
+
+  // Public schedule
+  useGetScheduleQuery,
 
   // Historical
   useGetPastSessionsQuery,

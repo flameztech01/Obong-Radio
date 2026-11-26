@@ -1,77 +1,100 @@
 // src/context/AudioPlayerContext.jsx
-import React, { createContext, useContext, useState, useEffect, useRef, useMemo } from 'react';
-import { Room, RoomEvent, Track } from 'livekit-client';
-import { useGetListenerTokenQuery, useGetMusicQueueQuery } from '../features/radioApiSlice';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useRef,
+  useMemo,
+} from "react";
+import { Room, RoomEvent, Track } from "livekit-client";
+import {
+  useGetListenerTokenQuery,
+  useLazyGetNowPlayingQuery,
+} from "../features/radioApiSlice";
+import { socket } from "../services/socket";
 
 const AudioPlayerContext = createContext();
-
 export const useAudioPlayer = () => useContext(AudioPlayerContext);
 
-const EMPTY_QUEUE = [];
-const STALL_TIMEOUT_MS = 12000; // if a track hasn't started playing after this, skip it
-const DEFAULT_COVER = "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=600&auto=format&fit=crop";
-const MUSIC_BG = "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=1200&auto=format&fit=crop";
-const LIVE_BG = "https://images.unsplash.com/photo-1598488035139-bdbb2231ce04?q=80&w=1200&auto=format&fit=crop";
+const STALL_TIMEOUT_MS = 12000;
+const DRIFT_THRESHOLD_SEC = 3;   // only re-seek if we're more than this off
+const SYNC_POLL_MS = 45000;      // server re-sync cadence
+
+const DEFAULT_COVER =
+  "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=600&auto=format&fit=crop";
+const MUSIC_BG =
+  "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=1200&auto=format&fit=crop";
+const LIVE_BG =
+  "https://images.unsplash.com/photo-1598488035139-bdbb2231ce04?q=80&w=1200&auto=format&fit=crop";
 
 const safePlay = (el, onBlocked) => {
   if (!el) return;
   const playPromise = el.play();
   if (playPromise !== undefined) {
     playPromise.catch((error) => {
-      if (error.name === 'AbortError') return; // interrupted by a new load, normal
-      if (error.name === 'NotAllowedError') onBlocked?.(); // browser blocked autoplay
+      if (error.name === "AbortError") return;
+      if (error.name === "NotAllowedError") onBlocked?.();
       else console.warn("Audio playback error:", error);
     });
   }
 };
 
 export const AudioPlayerProvider = ({ children }) => {
-  const [isPlaying, setIsPlaying] = useState(false);     // what the listener WANTS (play/pause intent)
-  const [isBuffering, setIsBuffering] = useState(false); // true until audio is actually coming out
+  /* ============================================================
+     PLAYBACK INTENT
+     ============================================================ */
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(70);
-  const [currentTrack, setCurrentTrack] = useState({ title: 'Auto DJ', artist: 'Getting tracks ready...', image: null });
 
-  // DOM / SDK refs
-  const livekitRoomRef = useRef(null);
+  // The server-synchronized "what everyone is hearing right now"
+  // shape: { track, offsetSec, durationSec, index, nextTrack }
+  const [nowPlaying, setNowPlaying] = useState(null);
+
+  /* ============================================================
+     REFS
+     ============================================================ */
   const audioRef = useRef(null);
+  const livekitRoomRef = useRef(null);
   const livekitAudioContainerRef = useRef(null);
-  const preloadRef = useRef(null);
 
-  // Mutable state refs (so event handlers and timers never read stale values)
+  // Mutable mirrors — event handlers + timers read these, never state
   const isPlayingRef = useRef(false);
   const isLiveRef = useRef(false);
   const volumeRef = useRef(70);
   const mutedRef = useRef(false);
   const tokenRef = useRef(null);
-  const queueRef = useRef(EMPTY_QUEUE);
-  const indexRef = useRef(0);
-  const hasLoadedRef = useRef(false);
-  const failCountRef = useRef(0);
-  const stallTimerRef = useRef(null);
-  const preloadedIndexRef = useRef(-1);
 
-  // Global fetching
-  const { data: tokenData } = useGetListenerTokenQuery(undefined, { pollingInterval: 30000 });
+  // Synchronization state
+  const currentTrackIdRef = useRef(null);      // Mongo _id of the track we've loaded
+  const anchorRef = useRef({ offset: 0, at: 0 }); // local drift-calc anchor
+
+  // Failure / stall handling
+  const stallTimerRef = useRef(null);
+  const failCountRef = useRef(0);
+
+  /* ============================================================
+     SERVER DATA
+     ============================================================ */
+  const { data: tokenData, refetch: refetchToken } = useGetListenerTokenQuery(
+    undefined,
+    { pollingInterval: 30000 }
+  );
+  const [fetchNowPlaying] = useLazyGetNowPlayingQuery();
+
   const isLive = tokenData?.active === true && !!tokenData?.token;
   const isMusicMode = !isLive;
-  const { data: queueData } = useGetMusicQueueQuery(undefined, { skip: isLive });
-
-  // Stable queue reference (the old code created a new [] every render)
-  const musicQueue = useMemo(() => {
-    if (tokenData?.musicQueue?.length > 0) return tokenData.musicQueue;
-    return queueData?.queue?.length > 0 ? queueData.queue : EMPTY_QUEUE;
-  }, [tokenData?.musicQueue, queueData?.queue]);
 
   // Keep refs in sync every render
   isLiveRef.current = isLive;
   tokenRef.current = tokenData?.token || null;
-  queueRef.current = musicQueue;
   volumeRef.current = volume;
   mutedRef.current = isMuted;
 
   /* ============================================================
-     AUTO DJ ENGINE
+     STALL TIMER
      ============================================================ */
   const clearStallTimer = () => {
     if (stallTimerRef.current) {
@@ -87,81 +110,155 @@ export const AudioPlayerProvider = ({ children }) => {
     setIsBuffering(false);
   };
 
-  // Start a timer: if audio hasn't actually started by then, skip to the next track
   const armStallTimer = () => {
     clearStallTimer();
     stallTimerRef.current = setTimeout(() => {
       stallTimerRef.current = null;
       if (!isPlayingRef.current || isLiveRef.current) return;
-      console.warn("Track took too long to start, skipping...");
-      skipAfterFailure();
+      console.warn("Track took too long to start — re-syncing from server.");
+      // Instead of skipping to the next track, re-fetch from the server.
+      // It might point to the same track at a different offset, or a new track.
+      resyncFromServer();
     }, STALL_TIMEOUT_MS);
   };
 
-  const preloadNext = (currentIndex) => {
-    const q = queueRef.current;
-    if (q.length < 2) return;
-    const next = q[(currentIndex + 1) % q.length];
-    if (!next?.audioUrl) return;
-    if (!preloadRef.current) preloadRef.current = new Audio();
-    preloadRef.current.preload = 'auto';
-    preloadRef.current.src = next.audioUrl;
-  };
-
-  const loadTrack = (index, autoplay) => {
+  /* ============================================================
+     CORE: load a track at the server-given offset
+     ============================================================ */
+  const loadSyncedTrack = (np, autoplay) => {
     const audio = audioRef.current;
-    const q = queueRef.current;
-    if (!audio || q.length === 0) return;
+    if (!audio || !np?.track) return;
 
-    const i = ((index % q.length) + q.length) % q.length;
-    const song = q[i];
+    const { track, offsetSec } = np;
+    const isSameTrack = currentTrackIdRef.current === track._id;
 
-    indexRef.current = i;
-    hasLoadedRef.current = true;
-    setCurrentTrack({ title: song.title, artist: song.artist, image: song.image });
+    // Update anchor so local progress / drift calc is fresh
+    anchorRef.current = { offset: offsetSec || 0, at: performance.now() };
+    setNowPlaying(np);
 
-    audio.src = song.audioUrl;
-    audio.load();
-
-    if (autoplay) {
-      setIsBuffering(true);
-      armStallTimer();
-      safePlay(audio, onAutoplayBlocked);
-    } else {
-      setIsBuffering(false);
-      clearStallTimer();
-    }
-  };
-
-  const skipAfterFailure = () => {
-    const q = queueRef.current;
-    failCountRef.current += 1;
-
-    // Every track in the queue failed in a row: stop instead of looping forever
-    if (q.length === 0 || failCountRef.current >= q.length) {
-      console.error("No playable tracks found in the queue.");
-      failCountRef.current = 0;
-      clearStallTimer();
-      isPlayingRef.current = false;
-      setIsPlaying(false);
-      setIsBuffering(false);
+    // Same track + already close enough → just correct drift, don't reload
+    if (isSameTrack && audio.src) {
+      const drift = Math.abs(audio.currentTime - (offsetSec || 0));
+      if (drift > DRIFT_THRESHOLD_SEC) {
+        audio.currentTime = offsetSec || 0;
+        anchorRef.current = { offset: offsetSec || 0, at: performance.now() };
+      }
       return;
     }
 
-    loadTrack(indexRef.current + 1, isPlayingRef.current);
+    // New track → load, seek, play
+    currentTrackIdRef.current = track._id;
+    audio.src = track.audioUrl;
+    audio.load();
+
+    const seekAndPlay = () => {
+      try {
+        audio.currentTime = offsetSec || 0;
+      } catch (_) {
+        /* seeking before metadata is ready — onloadedmetadata will fire */
+      }
+      if (autoplay) {
+        setIsBuffering(true);
+        armStallTimer();
+        safePlay(audio, onAutoplayBlocked);
+      }
+    };
+
+    if (audio.readyState >= 1) {
+      seekAndPlay();
+    } else {
+      audio.addEventListener("loadedmetadata", seekAndPlay, { once: true });
+    }
   };
 
-  // <audio> element events: the source of truth for "is sound really playing"
+  /* ============================================================
+     RESYNC FROM SERVER (used by stall timer + poll + ended)
+     ============================================================ */
+  const resyncFromServer = async () => {
+    if (!isMusicMode) return;
+    try {
+      const res = await fetchNowPlaying().unwrap();
+      const np = res?.nowPlaying;
+      if (!np?.track) return;
+      loadSyncedTrack(np, isPlayingRef.current);
+    } catch (err) {
+      console.warn("resyncFromServer failed:", err?.message);
+    }
+  };
+
+  /* ============================================================
+     INITIAL SYNC — whenever tokenData gives us a nowPlaying snapshot
+     ============================================================ */
+  useEffect(() => {
+    if (!isMusicMode) return;
+    const np = tokenData?.nowPlaying;
+    if (!np?.track) return;
+
+    // If the track changed on the server, adopt it
+    const changedTrack = currentTrackIdRef.current !== np.track._id;
+    if (changedTrack) {
+      loadSyncedTrack(np, isPlayingRef.current);
+    } else {
+      // Same track — keep the anchor accurate without disturbing playback
+      anchorRef.current = { offset: np.offsetSec || 0, at: performance.now() };
+      setNowPlaying(np);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tokenData?.nowPlaying?.track?._id, isMusicMode]);
+
+  /* ============================================================
+     DRIFT CORRECTION POLL — every 45s while playing
+     ============================================================ */
+  useEffect(() => {
+    if (!isMusicMode || !isPlaying) return;
+
+    const interval = setInterval(() => {
+      resyncFromServer();
+    }, SYNC_POLL_MS);
+
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMusicMode, isPlaying]);
+
+  /* ============================================================
+     SOCKET: admin changed the track → jump everyone instantly
+     ============================================================ */
+  useEffect(() => {
+    const handleTrackChanged = ({ nowPlaying: np }) => {
+      if (!np?.track) return;
+      loadSyncedTrack(np, isPlayingRef.current);
+    };
+    socket.on("radio:track_changed", handleTrackChanged);
+    return () => socket.off("radio:track_changed", handleTrackChanged);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ============================================================
+     SWITCHING BETWEEN LIVE AND MUSIC
+     ============================================================ */
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (!isMusicMode) {
+      // Going live → silence local audio
+      audio.pause();
+      clearStallTimer();
+      setIsBuffering(false);
+    } else if (isPlayingRef.current && currentTrackIdRef.current) {
+      // Back to Auto-DJ → re-sync
+      resyncFromServer();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMusicMode]);
+
+  /* ============================================================
+     <audio> EVENT HANDLERS
+     ============================================================ */
   const handlePlaying = () => {
     clearStallTimer();
     failCountRef.current = 0;
     setIsBuffering(false);
-
-    // Audio is flowing, so warm up the next track in the background
-    if (preloadedIndexRef.current !== indexRef.current) {
-      preloadedIndexRef.current = indexRef.current;
-      preloadNext(indexRef.current);
-    }
   };
 
   const handleWaiting = () => {
@@ -172,42 +269,27 @@ export const AudioPlayerProvider = ({ children }) => {
 
   const handleError = () => {
     const audio = audioRef.current;
-    if (!audio || !audio.getAttribute('src') || isLiveRef.current) return;
-    console.warn("Track failed to load:", audio.src, "code:", audio.error?.code);
-    skipAfterFailure();
-  };
-
-  const handleSongEnd = () => {
-    clearStallTimer();
-    loadTrack(indexRef.current + 1, true);
-  };
-
-  // First load: pick a random starting track once the queue arrives
-  useEffect(() => {
-    if (!isMusicMode || musicQueue.length === 0 || hasLoadedRef.current) return;
-    loadTrack(Math.floor(Math.random() * musicQueue.length), isPlayingRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMusicMode, musicQueue]);
-
-  // Switching between live and Auto DJ
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    if (!isMusicMode) {
-      audio.pause();
-      clearStallTimer();
+    if (!audio || !audio.getAttribute("src") || isLiveRef.current) return;
+    failCountRef.current += 1;
+    if (failCountRef.current > 3) {
+      console.error("Too many consecutive playback errors — pausing.");
+      isPlayingRef.current = false;
+      setIsPlaying(false);
       setIsBuffering(false);
-    } else if (isPlayingRef.current && hasLoadedRef.current) {
-      setIsBuffering(true);
-      armStallTimer();
-      safePlay(audio, onAutoplayBlocked);
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMusicMode]);
+    // Ask the server which track should be playing now
+    resyncFromServer();
+  };
+
+  const handleEnded = () => {
+    // Track finished — fetch the fresh "now playing" (which may be the next
+    // track at offset 0, or something else if the admin hopped around).
+    resyncFromServer();
+  };
 
   /* ============================================================
-     LIVEKIT (only reconnects when going live / ending, NOT on every poll)
+     LIVEKIT (unchanged behaviour — only reconnects on live/music flip)
      ============================================================ */
   useEffect(() => {
     if (!isLive) return;
@@ -218,11 +300,11 @@ export const AudioPlayerProvider = ({ children }) => {
 
     room.on(RoomEvent.TrackSubscribed, (track) => {
       if (track.kind !== Track.Kind.Audio) return;
-      const audioElement = track.attach();
-      audioElement.volume = volumeRef.current / 100;
-      audioElement.muted = mutedRef.current;
-      livekitAudioContainerRef.current?.appendChild(audioElement);
-      if (isPlayingRef.current) safePlay(audioElement);
+      const audioEl = track.attach();
+      audioEl.volume = volumeRef.current / 100;
+      audioEl.muted = mutedRef.current;
+      livekitAudioContainerRef.current?.appendChild(audioEl);
+      if (isPlayingRef.current) safePlay(audioEl);
     });
 
     room.on(RoomEvent.TrackUnsubscribed, (track) => {
@@ -230,7 +312,10 @@ export const AudioPlayerProvider = ({ children }) => {
     });
 
     room
-      .connect(import.meta.env.VITE_LIVEKIT_URL || 'wss://your-url.livekit.cloud', tokenRef.current)
+      .connect(
+        import.meta.env.VITE_LIVEKIT_URL || "wss://your-url.livekit.cloud",
+        tokenRef.current
+      )
       .catch((err) => {
         if (!cancelled) console.error("LiveKit connect failed:", err);
       });
@@ -251,42 +336,42 @@ export const AudioPlayerProvider = ({ children }) => {
       audioRef.current.volume = volume / 100;
       audioRef.current.muted = isMuted;
     }
-    livekitAudioContainerRef.current?.querySelectorAll('audio').forEach((el) => {
+    livekitAudioContainerRef.current?.querySelectorAll("audio").forEach((el) => {
       el.volume = volume / 100;
       el.muted = isMuted;
     });
   }, [volume, isMuted]);
 
-  // Cleanup on unmount
+  /* ============================================================
+     CLEANUP
+     ============================================================ */
   useEffect(() => {
     return () => {
       clearStallTimer();
-      if (preloadRef.current) {
-        preloadRef.current.removeAttribute('src');
-        preloadRef.current.load();
-      }
     };
   }, []);
 
   /* ============================================================
      CONTROLS
      ============================================================ */
-  const togglePlay = () => {
+  const togglePlay = async () => {
     const next = !isPlayingRef.current;
     isPlayingRef.current = next;
     setIsPlaying(next);
 
-    // Live stream
+    // ---- LIVE MODE ----
     if (isLiveRef.current) {
       livekitRoomRef.current?.startAudio?.().catch(() => {});
-      livekitAudioContainerRef.current?.querySelectorAll('audio').forEach((el) => {
-        if (next) safePlay(el);
-        else el.pause();
-      });
+      livekitAudioContainerRef.current
+        ?.querySelectorAll("audio")
+        .forEach((el) => {
+          if (next) safePlay(el);
+          else el.pause();
+        });
       return;
     }
 
-    // Auto DJ
+    // ---- AUTO-DJ MODE ----
     const audio = audioRef.current;
     if (!audio) return;
 
@@ -300,8 +385,26 @@ export const AudioPlayerProvider = ({ children }) => {
     failCountRef.current = 0;
     setIsBuffering(true);
 
-    // Queue hasn't arrived yet: the first-load effect will autoplay as soon as it does
-    if (!hasLoadedRef.current) return;
+    // First play → ask server where we should be and jump there
+    if (!currentTrackIdRef.current) {
+      await resyncFromServer();
+      return;
+    }
+
+    // Same track → make sure we're aligned, then play
+    try {
+      const res = await fetchNowPlaying().unwrap();
+      const np = res?.nowPlaying;
+      if (np?.track) {
+        const drift = Math.abs(audio.currentTime - (np.offsetSec || 0));
+        if (np.track._id !== currentTrackIdRef.current || drift > DRIFT_THRESHOLD_SEC) {
+          loadSyncedTrack(np, true);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("Pre-play sync failed:", err?.message);
+    }
 
     armStallTimer();
     safePlay(audio, onAutoplayBlocked);
@@ -314,30 +417,63 @@ export const AudioPlayerProvider = ({ children }) => {
   };
 
   const toggleMute = () => {
-    if (isMuted && volume === 0) setVolume(70); // unmuting at 0 would still be silent
+    if (isMuted && volume === 0) setVolume(70);
     setIsMuted(!isMuted);
   };
 
   /* ============================================================
      DERIVED DATA
      ============================================================ */
+  const currentShow = useMemo(() => {
+    if (!isMusicMode) {
+      return {
+        title: tokenData?.session?.title || "Live Broadcast",
+        host: tokenData?.session?.hostName || "O.U Radio",
+        image: tokenData?.session?.posterImage || LIVE_BG,
+      };
+    }
+    const np = nowPlaying || tokenData?.nowPlaying;
+    if (np?.track) {
+      return {
+        title: np.track.title,
+        host: np.track.artist,
+        image: np.track.image || DEFAULT_COVER,
+      };
+    }
+    return {
+      title: "Auto DJ",
+      host: "Getting tracks ready…",
+      image: DEFAULT_COVER,
+    };
+  }, [isMusicMode, nowPlaying, tokenData]);
+
   const showImage = isMusicMode
     ? MUSIC_BG
     : tokenData?.session?.posterImage || LIVE_BG;
 
-  const currentShow = isMusicMode
-    ? { title: currentTrack.title, host: currentTrack.artist, image: currentTrack.image || DEFAULT_COVER }
-    : {
-        title: tokenData?.session?.title || 'Live Broadcast',
-        host: tokenData?.session?.hostName || 'O.U Radio',
-        image: showImage,
-      };
-
   return (
-    <AudioPlayerContext.Provider value={{
-      isPlaying, isBuffering, isMusicMode, currentShow, volume, isMuted,
-      togglePlay, toggleMute, handleVolumeChange, showImage
-    }}>
+    <AudioPlayerContext.Provider
+      value={{
+        // Playback state
+        isPlaying,
+        isBuffering,
+        isMusicMode,
+        isLive,
+        // Data
+        nowPlaying: nowPlaying || tokenData?.nowPlaying || null,
+        currentShow,
+        showImage,
+        // Controls
+        volume,
+        isMuted,
+        togglePlay,
+        toggleMute,
+        handleVolumeChange,
+        // Escape hatches
+        refetchToken,
+        resyncFromServer,
+      }}
+    >
       <div ref={livekitAudioContainerRef} className="hidden" />
       <audio
         ref={audioRef}
@@ -345,7 +481,7 @@ export const AudioPlayerProvider = ({ children }) => {
         onPlaying={handlePlaying}
         onWaiting={handleWaiting}
         onError={handleError}
-        onEnded={handleSongEnd}
+        onEnded={handleEnded}
         className="hidden"
       />
       {children}
